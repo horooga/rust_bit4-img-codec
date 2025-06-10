@@ -6,7 +6,7 @@ use image::{
 };
 use once_cell::sync::Lazy;
 use rand::{Rng, rng};
-use std::{collections::HashMap, fs, io::Write};
+use std::{collections::HashMap, fs, io::Write, process::exit, sync::Arc, thread};
 
 static PALETTE: Palette = Palette {
     colors: [
@@ -81,6 +81,38 @@ fn save_img(img: ImageBuffer<Rgb<u8>, Vec<u8>>) -> Result<(), image::ImageError>
     }
 }
 
+fn write_file(bytes: &[u8]) {
+    let mut file = fs::File::create("encoded.bin").unwrap();
+    let _ = file.write_all(bytes);
+}
+
+fn bytes_to_base64url(bytes: &[u8]) -> String {
+    base64_url::encode(bytes)
+}
+
+fn base64url_to_bytes(code: &str) -> Option<Vec<u8>> {
+    base64_url::decode(code).ok()
+}
+
+fn pack_dimensions(a: u16, b: u16) -> [u8; 3] {
+    let combined: u32 = ((a as u32) << 12) | (b as u32);
+
+    [
+        ((combined >> 16) & 0xFF) as u8,
+        ((combined >> 8) & 0xFF) as u8,
+        (combined & 0xFF) as u8,
+    ]
+}
+
+fn unpack_dimensions(bytes: &[u8]) -> (u32, u32) {
+    let combined: u32 = ((bytes[0] as u32) << 16) | ((bytes[1] as u32) << 8) | (bytes[2] as u32);
+
+    let height = (combined >> 12) as u16 & 0xFFF;
+    let width = (combined & 0xFFF) as u16;
+
+    (height as u32, width as u32)
+}
+
 fn bits_to_bytes(bytes: &[bool]) -> Vec<u8> {
     bytes
         .chunks(8)
@@ -105,14 +137,6 @@ fn bytes_to_bits(bytes: &[u8]) -> Vec<bool> {
     bits
 }
 
-fn bytes_to_base64url(bytes: &[u8]) -> String {
-    base64_url::encode(bytes)
-}
-
-fn base64url_to_bytes(code: &str) -> Option<Vec<u8>> {
-    base64_url::decode(code).ok()
-}
-
 fn gen_key() -> String {
     let mut rng = rng();
     bytes_to_base64url(
@@ -123,28 +147,8 @@ fn gen_key() -> String {
     )
 }
 
-fn pack_dimensions(a: u16, b: u16) -> [u8; 3] {
-    let combined: u32 = ((a as u32) << 12) | (b as u32);
-
-    [
-        ((combined >> 16) & 0xFF) as u8,
-        ((combined >> 8) & 0xFF) as u8,
-        (combined & 0xFF) as u8,
-    ]
-}
-
-fn unpack_dimensions(bytes: &[u8]) -> (u32, u32) {
-    let combined: u32 = ((bytes[0] as u32) << 16) | ((bytes[1] as u32) << 8) | (bytes[2] as u32);
-
-    let height = (combined >> 12) as u16 & 0xFFF;
-    let width = (combined & 0xFFF) as u16;
-
-    (height as u32, width as u32)
-}
-
-fn decode(bits: Vec<bool>) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
-    let (width, height) = unpack_dimensions(&bits_to_bytes(&bits.clone()[..=23]));
-    let bytes: Vec<u8> = bits[24..]
+fn decode(bits: Vec<u8>) -> Vec<u8> {
+    bytes_to_bits(bits.as_slice())
         .chunks_exact(4)
         .flat_map(|i| {
             DECODES[&i
@@ -153,24 +157,19 @@ fn decode(bits: Vec<bool>) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
                 .collect::<String>()]
                 .clone()
         })
-        .collect();
-    if let Some(img) = ImageBuffer::from_raw(width, height, bytes.to_owned()) {
-        img
-    } else {
-        panic!("Error: wrong code or base64url_key");
-    }
+        .collect()
 }
 
-fn encode(mut img: ImageBuffer<Rgb<u8>, Vec<u8>>) -> Vec<u8> {
-    dither(&mut img, &PALETTE);
-    let bytes = &img.clone().into_raw();
-
+fn encode(bytes: &[u8]) -> Vec<u8> {
     let pixel_bits: Vec<bool> = bytes
         .chunks_exact(3)
         .map(|rgb| {
             ENCODES
                 .get(&rgb.to_vec())
-                .unwrap_or_else(|| panic!("{:?}", rgb))
+                .unwrap_or_else(|| {
+                    eprintln!("Error: Invalid pixel");
+                    exit(1);
+                })
                 .to_owned()
         })
         .collect::<Vec<String>>()
@@ -178,18 +177,7 @@ fn encode(mut img: ImageBuffer<Rgb<u8>, Vec<u8>>) -> Vec<u8> {
         .chars()
         .map(|c| c == '1')
         .collect::<Vec<bool>>();
-    let pixel_bytes = bits_to_bytes(pixel_bits.as_slice());
-    let mut output_bytes = Vec::with_capacity(pixel_bytes.len() + 3);
-    let (height, width) = &img.dimensions();
-    if *height > 4095 {
-        println!("Warning: heigth is higher than 4095 pixels");
-    }
-    if *width > 4095 {
-        println!("Warning: width is higher than 4095 pixels")
-    }
-    output_bytes.extend_from_slice(&pack_dimensions(*height as u16, *width as u16));
-    output_bytes.extend_from_slice(pixel_bytes.as_slice());
-    output_bytes
+    bits_to_bytes(pixel_bits.as_slice())
 }
 
 fn decrypt(cipher: &[u8], key: &str) -> Option<Vec<u8>> {
@@ -212,59 +200,107 @@ fn encrypt(bytes: &[u8], key: &str) -> Option<Vec<u8>> {
     )
 }
 
-fn write_file(bytes: &[u8]) {
-    let mut file = fs::File::create("encoded.bin").unwrap();
-    let _ = file.write_all(bytes);
+fn process_decode(mut chunk: Vec<u8>, key_opt: Option<String>) -> Vec<u8> {
+    if let Some(key) = key_opt {
+        if let Some(decrypted) = decrypt(chunk.as_slice(), key.as_str()) {
+            chunk = decrypted
+        } else {
+            eprintln!("Error: invalid code or key");
+            exit(1);
+        }
+    }
+    decode(chunk)
+}
+
+fn process_encode(mut chunk: Vec<u8>, key_opt: Option<String>) -> Vec<u8> {
+    chunk = encode(chunk.as_slice());
+    if let Some(key) = key_opt {
+        if let Some(encrypted) = encrypt(chunk.as_slice(), key.as_str()) {
+            chunk = encrypted
+        } else {
+            eprintln!("Error: invalid code or key");
+            exit(1);
+        }
+    }
+    chunk
 }
 
 //using result as enum for two "Ok()" dtypes
-fn do_input(
-    file_read: bool,
-    encode: bool,
-    input: &str,
-) -> Result<Result<ImageBuffer<Rgb<u8>, Vec<u8>>, Vec<u8>>, String> {
-    if file_read {
-        if encode {
-            if let Ok(img) = open_img(input) {
-                Ok(Ok(img))
-            } else {
-                Err("Error: File path does not exists".to_string())
-            }
-        } else if let Ok(bytes) = fs::read(input) {
-            Ok(Err(bytes))
+fn do_input(encode: bool, input: &str) -> Result<ImageBuffer<Rgb<u8>, Vec<u8>>, Vec<u8>> {
+    if encode {
+        if let Ok(img) = open_img(input) {
+            Ok(img)
         } else {
-            Err("Error: File path does not exists".to_string())
+            eprintln!("Error: File path does not exists");
+            exit(1);
         }
-    } else if let Some(bytes) = base64url_to_bytes(input) {
-        Ok(Err(bytes))
+    } else if let Ok(bytes) = fs::read(input) {
+        Err(bytes)
     } else {
-        Err("Error: Invalid code".to_string())
+        eprintln!("Error: File path does not exists");
+        exit(1);
     }
 }
 
-fn do_decode(bytes: Vec<u8>, key: Option<&str>) -> Result<ImageBuffer<Rgb<u8>, Vec<u8>>, String> {
-    if let Some(some_key) = key {
-        if let Some(decrypted) = decrypt(bytes.as_slice(), some_key) {
-            Ok(decode(bytes_to_bits(decrypted.as_slice())))
-        } else {
-            Err("Error: Invalid key".to_string())
-        }
-    } else {
-        Ok(decode(bytes_to_bits(bytes.as_slice())))
+fn do_decode(bytes: Vec<u8>, key: Option<String>) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+    let data = Arc::new(&bytes[3..]);
+    let cpus_amount = num_cpus::get();
+    let chunk_size = data.len() / cpus_amount;
+    let mut handles = Vec::with_capacity(cpus_amount);
+    for i in 0..cpus_amount {
+        let data = Arc::clone(&data);
+        let start = i * chunk_size;
+        let end = ((i + 1) * chunk_size).min(data.len());
+        let chunk: Vec<u8> = data[start..end].to_vec();
+        let key_bind = key.clone();
+
+        let handle = thread::spawn(move || process_decode(chunk, key_bind));
+        handles.push(handle);
     }
+    let (width, height) = unpack_dimensions(&bytes[..=2]);
+    let mut results = Vec::new();
+    for handle in handles {
+        let processed_chunk = handle.join().unwrap();
+        results.extend(processed_chunk);
+    }
+    ImageBuffer::from_raw(width, height, results).unwrap()
 }
 
-fn do_encode(img: ImageBuffer<Rgb<u8>, Vec<u8>>, key: Option<&str>) -> Result<Vec<u8>, String> {
-    let mut encoded = encode(img);
-
-    if key.is_some() {
-        encoded = if let Some(encrypted) = encrypt(encoded.as_slice(), key.unwrap()) {
-            encrypted
-        } else {
-            return Err("Error: Invalid key".to_string());
-        }
+fn do_encode(mut img: ImageBuffer<Rgb<u8>, Vec<u8>>, key: Option<String>) -> Vec<u8> {
+    dither(&mut img, &PALETTE);
+    let (height, width) = img.dimensions();
+    if height > 4095 {
+        eprintln!("Error: height is higher than 4095 pixels");
+        exit(1);
     }
-    Ok(encoded)
+    if width > 4095 {
+        eprintln!("Error: width is higher than 4095 pixels");
+        exit(1);
+    }
+    let data = Arc::new(img.into_raw());
+    let cpus_amount = num_cpus::get();
+    let chunk_size = data.len() / cpus_amount;
+    let mut handles = Vec::with_capacity(cpus_amount);
+    for i in 0..cpus_amount {
+        let data = Arc::clone(&data);
+        let start = i * chunk_size;
+        let end = ((i + 1) * chunk_size).min(data.len());
+        let chunk: Vec<u8> = data[start..end].to_vec();
+        let key_bind = key.clone();
+
+        let handle = thread::spawn(move || process_encode(chunk, key_bind));
+        handles.push(handle);
+    }
+    let mut results = Vec::new();
+    for handle in handles {
+        let processed_chunk = handle.join().unwrap();
+        results.extend(processed_chunk);
+    }
+    let mut output_bytes = Vec::with_capacity(results.len() + 3);
+
+    output_bytes.extend_from_slice(&pack_dimensions(height as u16, width as u16));
+    output_bytes.extend_from_slice(results.as_slice());
+    output_bytes
 }
 
 //using result as enum for two "Ok()" dtypes
@@ -285,16 +321,14 @@ fn do_output(file_output: bool, data: Result<Vec<u8>, ImageBuffer<Rgb<u8>, Vec<u
     }
 }
 fn help() {
-    println!("Usage: exe [options(as single word)] [file_path | base64url_code | input_string] [base64url_key](opt)
+    println!("Usage: exe [options(as single word)] [file_path] [base64url_key(opt)]
 
     options:
-        - e - encode mode (always first option): input - existing [file_path], output - created ./encoded.bin or stdout error text
-        - d - decode mode (always first option): input - existing [file_path], output - stdout decode text or stdout error text
-        - ee - encode-encrypt mode (always first option): input - existing [file_path] and [base64url_key], output - created ./encoded.bin or stdout error text
-        - dd - decode-decrypt mode (always first option): input - existing [file_path] and [base64url_key], output - created ./decoded.png or stdout error text
-        - sw - string write: replaces output .bin file of a decoding operation with a base64url_code
-        - sr - string read: replaces input .bin [file_path] for decoding operation with a [base64url_code]
-        - g - 16bytes base64url key gen
+        - e - encode mode (always first option): input - existing [file_path], output - created ./encoded.bin or stderr
+        - d - decode mode (always first option): input - existing [file_path], output - stdout decode text or stderr
+        - ee - encode-encrypt mode (always first option): input - existing [file_path] and [base64url_key], output - created ./encoded.bin or stderr
+        - dd - decode-decrypt mode (always first option): input - existing [file_path] and [base64url_key], output - created ./decoded.png or stderr
+        - g - 16bytes base64url stdout key gen
 ")
 }
 
@@ -308,40 +342,18 @@ fn main() {
         return;
     }
     let options = args[1].clone();
-    let input_bytes = match do_input(
-        !options.contains("sr"),
-        options.contains("e"),
-        args[2].as_str(),
-    ) {
-        Ok(data) => data,
-        Err(err) => {
-            println!("{}", err);
-            return;
-        }
-    };
+    let input_bytes = do_input(options.contains("e"), args[2].as_str());
     let key = if options.contains("ee") || options.contains("dd") {
-        Some(args[3].as_str())
+        Some(args[3].clone())
     } else {
         None
     };
 
     //using result as enum for two "Ok()" dtypes
     let processed_data = if options.starts_with("e") {
-        Ok(match do_encode(input_bytes.unwrap(), key) {
-            Ok(data) => data,
-            Err(err) => {
-                println!("{}", err);
-                return;
-            }
-        })
+        Ok(do_encode(input_bytes.unwrap(), key))
     } else {
-        Err(match do_decode(input_bytes.unwrap_err(), key) {
-            Ok(text) => text,
-            Err(err) => {
-                println!("{}", err);
-                return;
-            }
-        })
+        Err(do_decode(input_bytes.unwrap_err(), key))
     };
     println!("{}", do_output(!options.contains("sw"), processed_data));
 }
