@@ -1,25 +1,46 @@
 Tool for images encoding and decoding with 4 bits per pixel efficiency
 
-!!!Warning!!!
+**!!!Warning!!!**
+
 during encoding input image is rewritten with a 4bit palette using Floyd-Steinberg dithering
 
-Tool features:
-    - 16-color palette (![ffffff](https://placehold.co/15x15/ffffff/ffffff.png), ![0000ff](https://placehold.co/15x15/0000ff/0000ff.png), ![00ff00](https://placehold.co/15x15/00ff00/00ff00.png), ![ff0000](https://placehold.co/15x15/ff0000/ff0000.png), ![00ffff](https://placehold.co/15x15/00ffff/00ffff.png), ![ff00ff](https://placehold.co/15x15/ff00ff/ff00ff.png), ![ffff00](https://placehold.co/15x15/ffff00/ffff00.png), ![c0c0c0](https://placehold.co/15x15/c0c0c0/c0c0c0.png), ![808080](https://placehold.co/15x15/808080/808080.png), ![000000](https://placehold.co/15x15/000000/000000.png), ![800000](https://placehold.co/15x15/800000/800000.png), ![808000](https://placehold.co/15x15/808000/808000.png), ![008000](https://placehold.co/15x15/008000/008000.png), ![008080](https://placehold.co/15x15/008080/008080.png), ![000080](https://placehold.co/15x15/000080/000080.png), ![800080](https://placehold.co/15x15/800080/800080.png))
-    - 4 bits per symbol encoding due to reduced alphabet
-    - AES128 encryption-decryption (length-preserving) available
+**Tool features:**
 
-Usage: exe [options(as single word)] [file_path | base64url_code] [base64url_key](opt for encrypt-decrypt)
+- 16-color palette (![ffffff](https://placehold.co/15x15/ffffff/ffffff.png), ![0000ff](https://placehold.co/15x15/0000ff/0000ff.png), ![00ff00](https://placehold.co/15x15/00ff00/00ff00.png), ![ff0000](https://placehold.co/15x15/ff0000/ff0000.png), ![00ffff](https://placehold.co/15x15/00ffff/00ffff.png), ![ff00ff](https://placehold.co/15x15/ff00ff/ff00ff.png), ![ffff00](https://placehold.co/15x15/ffff00/ffff00.png), ![c0c0c0](https://placehold.co/15x15/c0c0c0/c0c0c0.png), ![808080](https://placehold.co/15x15/808080/808080.png), ![000000](https://placehold.co/15x15/000000/000000.png), ![800000](https://placehold.co/15x15/800000/800000.png), ![808000](https://placehold.co/15x15/808000/808000.png), ![008000](https://placehold.co/15x15/008000/008000.png), ![008080](https://placehold.co/15x15/008080/008080.png), ![000080](https://placehold.co/15x15/000080/000080.png), ![800080](https://placehold.co/15x15/800080/800080.png))
+- 4 bits per symbol encoding due to reduced  palette
+- AES128 encryption-decryption (length-preserving) available
+
+**Usage:**
+
+    exe [mode] [file_path] [base64url_key(opt)]
 
     options:
-        - e - encode mode (always first option): input - existing [file_path], output - created ./encoded.bin or stderr
-        - d - decode mode (always first option): input - existing [file_path], output - stdout decode text or stderr
-        - ee - encode-encrypt mode (always first option): input - existing [file_path] and [base64url_key], output - created ./encoded.bin or stderr
-        - dd - decode-decrypt mode (always first option): input - existing [file_path] and [base64url_key], output - stdout decode text or stderr
+
+        - e - encode mode: input - existing [file_path], output - created ./encoded.bin or stderr
+        - d - decode mode: input - existing [file_path], output - stdout decode text or stderr
+        - ee - encode-encrypt mode: input - existing [file_path] and [base64url_key], output - created ./encoded.bin or stderr
+        - dd - decode-decrypt mode: input - existing [file_path] and [base64url_key], output - stdout decode text or stderr
         - g - 16bytes base64url stdout key gen
 
-Some details:
-    - max image size is 4095x4095, so the first three bytes of encoded is the image dimensions
-    - not used as effectively for images with many areas of the same color
-    - compiled exe will be named "codec4" as specified in Cargo.toml
+**Examples:**
+
+- input image:
+![image.png](./image.png)
+
+- codec4 ee image.png GqhLxZ5fhzDbc9pCpoKN4g:
+    *saved ./encoded.bin file
+
+- coded4 dd encoded.bin GqhLxZ5fhzDbc9pCpoKN4g:
+    *saved ./decoded.png image
+
+- output image:
+![decoded.png](./decoded.png)
+
+
+**Some details:**
+
+- max image size is 4095x4095, so the first three bytes of encoded is the image dimensions
+- not used as effectively for images with many areas of the same color
+- compiled exe will be named "codec4" as specified in Cargo.toml
 
 

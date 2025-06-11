@@ -1,12 +1,11 @@
 use aes::Aes128;
 use fpe::ff1::{BinaryNumeralString, FF1};
 use image::{
+    imageops::{dither, ColorMap},
     DynamicImage, ImageBuffer, ImageFormat, Rgb,
-    imageops::{ColorMap, dither},
 };
-use once_cell::sync::Lazy;
-use rand::{Rng, rng};
-use std::{collections::HashMap, fs, io::Write, process::exit, sync::Arc, thread};
+use rand::{rng, Rng};
+use std::{fs, io::Write, process::exit, sync::Arc, thread};
 
 static PALETTE: Palette = Palette {
     colors: [
@@ -29,17 +28,23 @@ static PALETTE: Palette = Palette {
     ],
 };
 
-static ENCODES: Lazy<HashMap<Vec<u8>, String>> = Lazy::new(|| {
-    PALETTE
-        .colors
-        .iter()
-        .enumerate()
-        .map(|(idx, rgb)| (vec![rgb[0], rgb[1], rgb[2]], format!("{:04b}", idx)))
-        .collect()
-});
-
-static DECODES: Lazy<HashMap<String, Vec<u8>>> =
-    Lazy::new(|| ENCODES.iter().map(|i| (i.1.clone(), i.0.clone())).collect());
+static COLORS: [[u8; 3]; 16] = [
+    [0x00, 0x00, 0x00],
+    [0xFF, 0xFF, 0xFF],
+    [0x00, 0x00, 0xFF],
+    [0x00, 0xFF, 0x00],
+    [0xFF, 0x00, 0x00],
+    [0x00, 0xFF, 0xFF],
+    [0xFF, 0x00, 0xFF],
+    [0xFF, 0xFF, 0x00],
+    [0xC0, 0xC0, 0xC0],
+    [0x80, 0x80, 0x80],
+    [0x80, 0x00, 0x00],
+    [0x80, 0x80, 0x00],
+    [0x00, 0x80, 0x00],
+    [0x00, 0x80, 0x80],
+    [0x00, 0x00, 0x80],
+    [0x80, 0x00, 0x80],];
 
 struct Palette {
     colors: [Rgb<u8>; 16],
@@ -67,6 +72,15 @@ impl ColorMap for Palette {
         let rgb = self.colors.to_owned()[idx];
         *color = Rgb([rgb[0], rgb[1], rgb[2]]);
     }
+}
+
+fn get_encode(pixel_target: &[u8]) -> u8 {
+    for (idx, pixel) in COLORS.iter().enumerate() {
+        if *pixel == pixel_target {
+            return idx as u8;
+        }
+    }
+    0
 }
 
 fn open_img(path: &str) -> Result<ImageBuffer<Rgb<u8>, Vec<u8>>, image::ImageError> {
@@ -113,28 +127,12 @@ fn unpack_dimensions(bytes: &[u8]) -> (u32, u32) {
     (height as u32, width as u32)
 }
 
-fn bits_to_bytes(bytes: &[bool]) -> Vec<u8> {
-    bytes
-        .chunks(8)
-        .map(|byte| {
-            byte.iter().enumerate().fold(
-                0_u8,
-                |acc, (i, &bit)| {
-                    if bit { acc | (1 << (7 - i)) } else { acc }
-                },
-            )
-        })
-        .collect()
+fn byte_to_codes(byte: u8) -> [u8; 2] {
+    [byte << 4, byte & 0x0F]
 }
 
-fn bytes_to_bits(bytes: &[u8]) -> Vec<bool> {
-    let mut bits = Vec::with_capacity(bytes.len() * 8);
-    for byte in bytes {
-        for i in 0..8 {
-            bits.push((byte & (1 << (7 - i))) != 0);
-        }
-    }
-    bits
+fn codes_to_byte(first: u8, second: u8) -> u8 {
+    first << 4 | second
 }
 
 fn gen_key() -> String {
@@ -147,37 +145,29 @@ fn gen_key() -> String {
     )
 }
 
-fn decode(bits: Vec<u8>) -> Vec<u8> {
-    bytes_to_bits(bits.as_slice())
-        .chunks_exact(4)
-        .flat_map(|i| {
-            DECODES[&i
-                .iter()
-                .map(|b| std::char::from_digit(if *b { 1 } else { 0 }, 2).unwrap())
-                .collect::<String>()]
-                .clone()
-        })
-        .collect()
+fn decode(bytes: Vec<u8>) -> Vec<u8> {
+    bytes.into_iter().flat_map(|byte| {
+        let [idx1, idx2] = byte_to_codes(byte);
+        let mut byte = [0; 8];
+        byte[..=4].copy_from_slice(&COLORS[idx1 as usize]);
+        byte[4..].copy_from_slice(&COLORS[idx2 as usize]);
+        byte
+    })
+    .collect()
 }
 
 fn encode(bytes: &[u8]) -> Vec<u8> {
-    let pixel_bits: Vec<bool> = bytes
-        .chunks_exact(3)
-        .map(|rgb| {
-            ENCODES
-                .get(&rgb.to_vec())
-                .unwrap_or_else(|| {
-                    eprintln!("Error: Invalid pixel");
-                    exit(1);
-                })
-                .to_owned()
-        })
-        .collect::<Vec<String>>()
-        .join("")
-        .chars()
-        .map(|c| c == '1')
-        .collect::<Vec<bool>>();
-    bits_to_bytes(pixel_bits.as_slice())
+    let mut output_bytes = Vec::with_capacity(bytes.len() / 6);
+    let mut code_prev = None;
+    for rgb in bytes.chunks_exact(3) {
+        let code_curr = get_encode(rgb);
+        if let Some(code_prev) = code_prev {
+            output_bytes.push(codes_to_byte(code_prev, code_curr));
+        } else {
+            code_prev = Some(code_curr);
+        }
+    }
+    output_bytes
 }
 
 fn decrypt(cipher: &[u8], key: &str) -> Option<Vec<u8>> {
@@ -254,7 +244,10 @@ fn do_decode(bytes: Vec<u8>, key: Option<String>) -> ImageBuffer<Rgb<u8>, Vec<u8
         let chunk: Vec<u8> = data[start..end].to_vec();
         let key_bind = key.clone();
 
-        let handle = thread::spawn(move || process_decode(chunk, key_bind));
+        let handle = thread::Builder::new()
+            .name(format!("processing-{i}/{cpus_amount}"))
+            .spawn(move || process_decode(chunk, key_bind))
+            .unwrap();
         handles.push(handle);
     }
     let (width, height) = unpack_dimensions(&bytes[..=2]);
@@ -288,7 +281,10 @@ fn do_encode(mut img: ImageBuffer<Rgb<u8>, Vec<u8>>, key: Option<String>) -> Vec
         let chunk: Vec<u8> = data[start..end].to_vec();
         let key_bind = key.clone();
 
-        let handle = thread::spawn(move || process_encode(chunk, key_bind));
+        let handle = thread::Builder::new()
+            .name(format!("processing-{i}/{cpus_amount}"))
+            .spawn(move || process_encode(chunk, key_bind))
+            .unwrap();
         handles.push(handle);
     }
     let mut results = Vec::new();
